@@ -31,7 +31,6 @@ public static class SelfRegisterUserEndpoint
         .WithDescription("Allow a user to self-register.")
         .AllowAnonymous()
         .Produces<RegisterUserResponse>(StatusCodes.Status201Created)
-        .Produces(StatusCodes.Status401Unauthorized)
-        .Produces(StatusCodes.Status403Forbidden);
+        .Produces(StatusCodes.Status400BadRequest);
     }
 }
