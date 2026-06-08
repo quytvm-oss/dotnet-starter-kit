@@ -13,7 +13,10 @@ public sealed class DeleteProductCommandHandler(CatalogDbContext dbContext)
     {
         ArgumentNullException.ThrowIfNull(command);
 
+        // IgnoreAutoIncludes is load-bearing: if Product.Images (AutoInclude'd) load here, Remove() cascades Deleted onto them
+        // and the soft-delete interceptor (rescues only owned refs) HARD-deletes them. Untracked keeps the delete a pure UPDATE so rows survive restore.
         var product = await dbContext.Products
+            .IgnoreAutoIncludes()
             .FirstOrDefaultAsync(p => p.Id == command.ProductId, cancellationToken)
             .ConfigureAwait(false)
             ?? throw new NotFoundException($"Product {command.ProductId} not found.");

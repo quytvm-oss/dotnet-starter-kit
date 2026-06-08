@@ -1,4 +1,5 @@
 using FSH.Framework.Eventing.Abstractions;
+using System.Collections.Concurrent;
 using System.Text.Json;
 
 namespace FSH.Framework.Eventing.Serialization;
@@ -14,6 +15,10 @@ public sealed class JsonEventSerializer : IEventSerializer
         WriteIndented = false
     };
 
+    // Resolving an event type by name (hot on outbox/inbox) reflectively parses the assembly-qualified
+    // name and scans loaded assemblies each time, so the result per distinct name is cached here.
+    private static readonly ConcurrentDictionary<string, Type?> TypeCache = new(StringComparer.Ordinal);
+
     public string Serialize(IIntegrationEvent @event)
     {
         ArgumentNullException.ThrowIfNull(@event);
@@ -25,7 +30,7 @@ public sealed class JsonEventSerializer : IEventSerializer
         ArgumentNullException.ThrowIfNull(payload);
         ArgumentNullException.ThrowIfNull(eventTypeName);
 
-        var type = Type.GetType(eventTypeName, throwOnError: false);
+        var type = TypeCache.GetOrAdd(eventTypeName, static n => Type.GetType(n, throwOnError: false));
         if (type is null)
         {
             return null;

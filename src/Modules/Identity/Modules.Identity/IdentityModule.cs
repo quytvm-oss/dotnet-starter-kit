@@ -1,7 +1,6 @@
 ﻿using Asp.Versioning;
 using FSH.Framework.Core.Context;
 using FSH.Framework.Eventing;
-using FSH.Framework.Eventing.Outbox;
 using FSH.Framework.Persistence;
 using FSH.Framework.Quota;
 using FSH.Framework.Storage;
@@ -47,7 +46,9 @@ using FSH.Modules.Identity.Features.v1.TwoFactor.Enroll;
 using FSH.Modules.Identity.Features.v1.TwoFactor.VerifyEnroll;
 using FSH.Modules.Identity.Features.v1.Users.AssignUserRoles;
 using FSH.Modules.Identity.Features.v1.Users.ChangePassword;
+using FSH.Modules.Identity.Features.v1.Users.AdminConfirmEmail;
 using FSH.Modules.Identity.Features.v1.Users.ConfirmEmail;
+using FSH.Modules.Identity.Features.v1.Users.ResendConfirmationEmail;
 using FSH.Modules.Identity.Features.v1.Users.DeleteUser;
 using FSH.Modules.Identity.Features.v1.Users.ForgotPassword;
 using FSH.Modules.Identity.Features.v1.Users.GetUserById;
@@ -64,8 +65,6 @@ using FSH.Modules.Identity.Features.v1.Users.SetProfileImage;
 using FSH.Modules.Identity.Features.v1.Users.ToggleUserStatus;
 using FSH.Modules.Identity.Features.v1.Users.UpdateUser;
 using FSH.Modules.Identity.Services;
-using Hangfire;
-using Hangfire.Common;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -154,9 +153,8 @@ public class IdentityModule : IModule
             options.Password.RequireUppercase = true;
             options.User.RequireUniqueEmail = true;
 
-            // Account lockout: 5 consecutive failed logins → 15-minute lockout.
-            // Applies to newly created users by default. Login flow triggers
-            // AccessFailedAsync / IsLockedOutAsync in IdentityService.
+            // Account lockout: 5 consecutive failed logins → 15-minute lockout (applies to new users by default).
+            // IdentityService's login flow drives AccessFailedAsync / IsLockedOutAsync.
             options.Lockout.AllowedForNewUsers = true;
             options.Lockout.MaxFailedAccessAttempts = 5;
             options.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(15);
@@ -188,16 +186,8 @@ public class IdentityModule : IModule
         group.MapGenerateTokenEndpoint().AllowAnonymous().RequireRateLimiting("auth");
         group.MapRefreshTokenEndpoint().AllowAnonymous().RequireRateLimiting("auth");
 
-        // example Hangfire setup for Identity outbox dispatcher
-        var jobManager = endpoints.ServiceProvider.GetService<IRecurringJobManager>();
-        if (jobManager is not null)
-        {
-            jobManager.AddOrUpdate(
-                "identity-outbox-dispatcher",
-                Job.FromExpression<OutboxDispatcher>(d => d.DispatchAsync(CancellationToken.None)),
-                Cron.Minutely(),
-                new RecurringJobOptions());
-        }
+        // The outbox is dispatched by the framework's OutboxDispatcherHostedService (on by default). A second dispatcher
+        // here would race the same rows (no row-level claim) → duplicate handlers + PK_InboxMessages collisions, so this module registers none.
 
         // roles
         group.MapGetRolesEndpoint();
@@ -214,6 +204,8 @@ public class IdentityModule : IModule
         // users
         group.MapAssignUserRolesEndpoint();
         group.MapChangePasswordEndpoint();
+        group.MapAdminConfirmEmailEndpoint();
+        group.MapResendConfirmationEmailEndpoint().RequireRateLimiting("auth");
         group.MapConfirmEmailEndpoint().RequireRateLimiting("auth");
         group.MapDeleteUserEndpoint();
         group.MapGetUserByIdEndpoint();

@@ -19,7 +19,7 @@ public sealed class AuditHttpMiddleware
     {
         ArgumentNullException.ThrowIfNull(ctx);
 
-        if (ShouldSkip(ctx))
+        if (ShouldSkip(ctx) || IsStreamingResponse(ctx))
         {
             await _next(ctx).ConfigureAwait(false);
             return;
@@ -200,6 +200,12 @@ public sealed class AuditHttpMiddleware
         return _opts.ExcludePathStartsWith.Any(prefix =>
             path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
     }
+
+    // Streaming responses (SSE / SignalR SSE) must never be buffered: the audit path buffers Response.Body and flushes
+    // only when the handler returns, but a long-lived stream never returns, so the client would hang. Detect via Accept header and pass through.
+    private static bool IsStreamingResponse(HttpContext ctx) =>
+        ctx.Request.Headers.Accept.Any(static v =>
+            v is not null && v.Contains("text/event-stream", StringComparison.OrdinalIgnoreCase));
 
     private readonly record struct RequestCaptureContext(object? Preview, int Size, int MaskedFields);
 }

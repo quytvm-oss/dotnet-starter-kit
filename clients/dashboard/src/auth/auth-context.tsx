@@ -1,10 +1,10 @@
-import { createContext, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { tokenStore } from "@/auth/token-store";
 import { decodeJwt, isTokenExpired, type JwtClaims } from "@/auth/jwt";
 import { issueToken } from "@/auth/api";
 import { refreshAccessToken } from "@/lib/api-client";
-import { endImpersonation, startImpersonation } from "@/api/identity";
+import { endImpersonation, getMyPermissions, startImpersonation } from "@/api/identity";
 
 export type AuthUser = {
   id: string;
@@ -33,29 +33,41 @@ export type AuthContextValue = {
    * while this is true, so a stale token never flashes a doomed dashboard.
    */
   isInitializing: boolean;
+  /**
+   * True once permissions have been fetched at least once for the current
+   * subject (or no user is signed in). Lets gated UI avoid flashing while the
+   * permissions request is still in flight.
+   */
+  permissionsHydrated: boolean;
   /** Truthy iff the current access token carries act_sub (impersonation mode). */
   impersonation: ImpersonationInfo | null;
   login: (input: { email: string; password: string; tenant: string }) => Promise<void>;
   logout: () => void;
+  /** Re-fetch the permission set for the signed-in user (e.g. after a role change). */
+  refreshPermissions: () => Promise<void>;
   /** Begin impersonating another user. Resolves once the new token is installed. */
   beginImpersonation: (input: {
     targetUserId: string;
     targetTenantId: string;
     reason?: string;
   }) => Promise<void>;
-  /** Stop impersonating and restore the operator session. */
-  stopImpersonation: () => Promise<void>;
+  /**
+   * Stop impersonating. Restores the operator's dashboard session for an
+   * intra-app impersonation, or signs out (→ /login) when there is no dashboard
+   * session to return to — e.g. a root operator who handed off from the admin
+   * app, since a SuperAdmin must never hold a tenant-dashboard session.
+   * Resolves with `{ signedOut }` so the caller can route accordingly.
+   */
+  stopImpersonation: () => Promise<{ signedOut: boolean }>;
 };
 
 export const AuthContext = createContext<AuthContextValue | null>(null);
 
-function claimsToUser(claims: JwtClaims | null): AuthUser | null {
+// Permissions are NOT in the JWT (it carries only role names). They're fetched
+// from /api/v1/identity/permissions and cached in the token store; this builds
+// the user from the token's identity claims + that separately-hydrated list.
+function claimsToUser(claims: JwtClaims | null, permissions: string[]): AuthUser | null {
   if (!claims?.sub) return null;
-  const permissions = Array.isArray(claims.permissions)
-    ? claims.permissions
-    : typeof claims.permissions === "string"
-      ? [claims.permissions]
-      : [];
   // `name` is the standard short claim; `unique_name` is what
   // JwtSecurityTokenHandler emits for ClaimTypes.Name. Treat empty
   // strings as missing so the topbar falls through to email/Unknown
@@ -100,8 +112,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const [user, setUser] = useState<AuthUser | null>(() => {
     const { claims, usable } = readStoredSession();
-    return usable ? claimsToUser(claims) : null;
+    return usable ? claimsToUser(claims, tokenStore.getPermissions()) : null;
   });
+  // Hydrated once permissions have been fetched for the current subject. Seed
+  // from any cached list so a warm reload doesn't flash ungated UI.
+  const [permissionsHydrated, setPermissionsHydrated] = useState<boolean>(() => {
+    if (!tokenStore.getAccessToken()) return true;
+    return tokenStore.getPermissions().length > 0;
+  });
+  const lastHydratedSubject = useRef<string | null>(null);
   const [impersonation, setImpersonation] = useState<ImpersonationInfo | null>(() => {
     const { claims, usable } = readStoredSession();
     return usable ? claimsToImpersonation(claims) : null;
@@ -135,10 +154,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Hydrate (or re-hydrate) the permission list from the server whenever the
+  // signed-in subject changes — covers cold-start, login, and impersonation
+  // swaps. Permissions live server-side per role, not in the JWT.
+  useEffect(() => {
+    if (!user) {
+      lastHydratedSubject.current = null;
+      setPermissionsHydrated(true);
+      return;
+    }
+    if (lastHydratedSubject.current === user.id && permissionsHydrated) {
+      return;
+    }
+    lastHydratedSubject.current = user.id;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const perms = await getMyPermissions();
+        if (cancelled) return;
+        // setPermissions emits → the subscribe listener rebuilds `user` with the list.
+        tokenStore.setPermissions(perms);
+        setPermissionsHydrated(true);
+      } catch {
+        // A fetch failure must not sign the user out — gated UI just stays
+        // hidden until the next successful hydration.
+        if (!cancelled) setPermissionsHydrated(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user, permissionsHydrated]);
+
   useEffect(() => {
     const refresh = () => {
       const claims = decodeJwt(tokenStore.getAccessToken());
-      setUser(claimsToUser(claims));
+      setUser(claimsToUser(claims, tokenStore.getPermissions()));
       setImpersonation(claimsToImpersonation(claims));
     };
     const unsubscribe = tokenStore.subscribe(refresh);
@@ -167,6 +218,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(
     async (input: { email: string; password: string; tenant: string }) => {
       tokenStore.setTenant(input.tenant);
+      // Stale permissions from a previous user must not leak into the new
+      // session — clear before issuing the token so the hydration effect
+      // re-fetches from scratch.
+      tokenStore.setPermissions([]);
+      setPermissionsHydrated(false);
       const tokens = await issueToken(input);
       // Defence-in-depth: even though the API rejects root-tenant logins
       // submitted with X-FSH-App=dashboard, double-check the issued token
@@ -209,7 +265,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [queryClient],
   );
 
-  const stopImpersonation = useCallback(async () => {
+  const stopImpersonation = useCallback(async (): Promise<{ signedOut: boolean }> => {
     // No stash ⇒ the operator arrived via a cross-app handoff (e.g. a root
     // SuperAdmin started impersonation from the admin app), so there is no
     // dashboard session to return to. The local impersonation token is
@@ -224,14 +280,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         /* best-effort: token expires shortly, nothing to recover here */
       });
       logout();
-      return;
+      return { signedOut: true };
     }
 
     // Intra-app impersonation: we genuinely need the server-minted operator
     // tokens to restore the original dashboard session, so await the call.
     try {
       const fresh = await endImpersonation();
+      // Defence-in-depth: the End endpoint mints fresh tokens for the *original
+      // operator*. If that operator is a root SuperAdmin (e.g. a cross-app
+      // handoff that nonetheless left a stash), installing them would drop a
+      // root account into the tenant dashboard — exactly what `login` forbids.
+      // Sign out and route to /login instead of restoring.
+      const claims = decodeJwt(fresh.accessToken);
+      if (claims?.tenant === "root") {
+        logout();
+        return { signedOut: true };
+      }
       tokenStore.endImpersonationWithFreshTokens(fresh.accessToken, fresh.refreshToken);
+      return { signedOut: false };
     } catch {
       // End endpoint failed (server unreachable / token invalid). Fall
       // back to whatever we stashed locally; the operator may need to
@@ -243,18 +310,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [queryClient, logout]);
 
+  const refreshPermissions = useCallback(async () => {
+    try {
+      const perms = await getMyPermissions();
+      tokenStore.setPermissions(perms);
+    } catch {
+      /* swallow — see hydration effect */
+    }
+  }, []);
+
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
       isAuthenticated: user !== null,
       isInitializing,
+      permissionsHydrated,
       impersonation,
       login,
       logout,
       beginImpersonation,
       stopImpersonation,
+      refreshPermissions,
     }),
-    [user, isInitializing, impersonation, login, logout, beginImpersonation, stopImpersonation],
+    [user, isInitializing, permissionsHydrated, impersonation, login, logout, beginImpersonation, stopImpersonation, refreshPermissions],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
