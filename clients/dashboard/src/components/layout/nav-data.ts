@@ -18,6 +18,7 @@ import {
   UsersRound,
   Wifi,
 } from "lucide-react";
+import { ALL_TRASH_PERMISSIONS } from "@/lib/trash-permissions";
 
 export type NavSpec = {
   to: string;
@@ -30,6 +31,13 @@ export type NavSpec = {
    * page the API will reject with 403.
    */
   perm?: string;
+  /**
+   * Visible only if the user holds *at least one* of these permissions. Use for
+   * an item that fronts several independently-gated sub-views (e.g. Trash, whose
+   * tabs each require a different permission) — the entry should show as long as
+   * the user can reach any one of them. Combined with `perm` via AND.
+   */
+  anyPerm?: readonly string[];
 };
 
 export type NavSection = {
@@ -45,8 +53,11 @@ export type NavSection = {
 // Settings is account-scoped and lives at the very bottom.
 export const topNavTop: NavSpec[] = [
   { to: "/", label: "Overview", icon: LayoutDashboard },
-  { to: "/chat", label: "Chat", icon: MessageCircle },
-  { to: "/files", label: "My Files", icon: FolderOpen },
+  // Each gate mirrors the permission the page's primary list endpoint enforces
+  // server-side (Chat → channels list, Files → /files/mine). Same convention
+  // as trash-permissions.ts: if the endpoint's permission changes, mirror it.
+  { to: "/chat", label: "Chat", icon: MessageCircle, perm: "Permissions.Chat.Channels.View" },
+  { to: "/files", label: "My Files", icon: FolderOpen, perm: "Permissions.Files.Upload" },
 ];
 
 export const topNavBottom: NavSpec[] = [
@@ -60,9 +71,10 @@ export const sections: NavSection[] = [
     caption: "Operations",
     icon: Activity,
     items: [
+      // Live activity is SSE-backed; the stream is auth-only (no permission), so no gate.
       { to: "/activity", label: "Live activity", icon: Activity },
-      { to: "/subscription", label: "Subscription", icon: CreditCard },
-      { to: "/invoices", label: "Invoices", icon: Receipt },
+      { to: "/subscription", label: "Subscription", icon: CreditCard, perm: "Permissions.Billing.View" },
+      { to: "/invoices", label: "Invoices", icon: Receipt, perm: "Permissions.Billing.View" },
     ],
   },
   {
@@ -70,9 +82,9 @@ export const sections: NavSection[] = [
     caption: "Catalog",
     icon: Package,
     items: [
-      { to: "/catalog/products", label: "Products", icon: Package },
-      { to: "/catalog/brands", label: "Brands", icon: Tags },
-      { to: "/catalog/categories", label: "Categories", icon: FolderTree },
+      { to: "/catalog/products", label: "Products", icon: Package, perm: "Permissions.Catalog.Products.View" },
+      { to: "/catalog/brands", label: "Brands", icon: Tags, perm: "Permissions.Catalog.Brands.View" },
+      { to: "/catalog/categories", label: "Categories", icon: FolderTree, perm: "Permissions.Catalog.Categories.View" },
     ],
   },
   {
@@ -80,7 +92,7 @@ export const sections: NavSection[] = [
     caption: "Helpdesk",
     icon: Ticket,
     items: [
-      { to: "/tickets", label: "Tickets", icon: Ticket },
+      { to: "/tickets", label: "Tickets", icon: Ticket, perm: "Permissions.Tickets.View" },
     ],
   },
   {
@@ -101,17 +113,24 @@ export const sections: NavSection[] = [
     caption: "System",
     icon: HeartPulse,
     items: [
+      // Health hits the anonymous /health/ready probe — visible to everyone.
       { to: "/system/health", label: "Health", icon: HeartPulse },
       { to: "/system/audits", label: "Audit trail", icon: ScrollText, perm: "Permissions.AuditTrails.View" },
       { to: "/system/sessions", label: "Sessions", icon: Wifi, perm: "Permissions.Sessions.ViewAll" },
-      { to: "/system/trash", label: "Trash", icon: Trash2 },
+      // Trash fronts five tabs, each gated on a different resource's restore /
+      // view-trash permission. Show the entry if the user can reach any tab; the
+      // page hides the individual tabs they can't (see trash-permissions.ts).
+      { to: "/system/trash", label: "Trash", icon: Trash2, anyPerm: ALL_TRASH_PERMISSIONS },
     ],
   },
 ];
 
-/** True when the item is ungated, or the user holds its required permission. */
+/** True when the user satisfies the item's gates: the single `perm` (if any)
+ *  AND at least one of `anyPerm` (if any). Ungated items are always visible. */
 function isNavItemVisible(item: NavSpec, permissions: readonly string[]): boolean {
-  return !item.perm || permissions.includes(item.perm);
+  if (item.perm && !permissions.includes(item.perm)) return false;
+  if (item.anyPerm && !item.anyPerm.some((p) => permissions.includes(p))) return false;
+  return true;
 }
 
 /** Drop items the user can't access, then drop any section left empty. */
