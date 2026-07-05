@@ -10,7 +10,6 @@
     <Project Path="BuildingBlocks/Quota/Quota.csproj" />
     <Project Path="BuildingBlocks/Shared/Shared.csproj" Id="3588897f-ada8-4f4f-a8f7-3457a1286769" />
     <Project Path="BuildingBlocks/Storage/Storage.csproj" />
-    <Project Path="BuildingBlocks/Quota/Quota.csproj" />
     <Project Path="BuildingBlocks/Web/Web.csproj" />
   </Folder>
   <Folder Name="/Modules/" />
