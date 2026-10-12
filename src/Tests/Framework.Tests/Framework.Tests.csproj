@@ -10,6 +10,7 @@
 
 	<ItemGroup>
 		<PackageReference Include="AutoFixture" />
+		<PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
 		<PackageReference Include="Microsoft.NET.Test.Sdk" />
 		<PackageReference Include="NSubstitute" />
 		<PackageReference Include="Shouldly" />
@@ -29,6 +30,15 @@
 		<ProjectReference Include="..\..\BuildingBlocks\Shared\Shared.csproj" />
 		<ProjectReference Include="..\..\BuildingBlocks\Storage\Storage.csproj" />
 		<ProjectReference Include="..\..\BuildingBlocks\Web\Web.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<None Include="..\..\Host\FSH.Starter.Api\appsettings.json"
+			  Link="HostConfiguration\appsettings.json"
+			  CopyToOutputDirectory="PreserveNewest" />
+		<None Include="..\..\Host\FSH.Starter.Api\appsettings.Production.json"
+			  Link="HostConfiguration\appsettings.Production.json"
+			  CopyToOutputDirectory="PreserveNewest" />
 	</ItemGroup>
 
 </Project>

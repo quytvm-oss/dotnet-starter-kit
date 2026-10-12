@@ -1,4 +1,5 @@
-﻿using FSH.Framework.Web;
+﻿using FSH.Framework.Eventing;
+using FSH.Framework.Web;
 using FSH.Framework.Web.Modules;
 using FSH.Modules.Auditing;
 using FSH.Modules.Identity;
@@ -37,6 +38,15 @@ if (builder.Environment.IsProduction())
     Require(config, "DatabaseOptions:ConnectionString");
     Require(config, "CachingOptions:Redis");
     Require(config, "JwtOptions:SigningKey");
+
+    // Password-reset / confirmation links are built from this; without it those flows can only 500.
+    // Absolute http(s) only: on Unix, Uri.TryCreate also accepts "/path" as a file:// URI.
+    if (!Uri.TryCreate(config["FrontendOptions:DefaultOrigin"], UriKind.Absolute, out Uri? defaultOrigin)
+        || (defaultOrigin.Scheme != Uri.UriSchemeHttp && defaultOrigin.Scheme != Uri.UriSchemeHttps))
+    {
+        throw new InvalidOperationException(
+            "Missing required configuration 'FrontendOptions:DefaultOrigin' in Production: set it to your dashboard URL, e.g. \"https://app.example.com\".");
+    }
 }
 
 builder.Services.AddMediator(o =>
@@ -88,6 +98,10 @@ builder.AddHeroPlatform(o =>
     o.EnableSse = true;
     o.EnableRealtime = true;
 });
+
+// The transactional outbox is framework infrastructure with exactly one owner
+// (EventingDbContext), so the host registers it once for every module (issue #1349).
+builder.Services.AddEventingCore(builder.Configuration);
 
 builder.AddModules(moduleAssemblies);
 

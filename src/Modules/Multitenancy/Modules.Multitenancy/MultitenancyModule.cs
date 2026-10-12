@@ -74,6 +74,14 @@ public sealed class MultitenancyModule : IModule
         builder.Services.Replace(
             ServiceDescriptor.Singleton<IEventTenantScope, FinbuckleEventTenantScope>());
 
+        // Same idea one level up: the outbox dispatcher must visit every database that can hold
+        // outbox rows. Without these, a tenant with a dedicated connection string writes rows the
+        // dispatcher never polls. Scoped provider — IMultiTenantStore is scoped.
+        builder.Services.Replace(
+            ServiceDescriptor.Singleton<IEventingDrainScope, FinbuckleEventingDrainScope>());
+        builder.Services.Replace(
+            ServiceDescriptor.Scoped<IEventingDrainTargetProvider, TenantStoreDrainTargetProvider>());
+
         builder.Services
             .AddMultiTenant<AppTenantInfo>(options =>
             {
@@ -82,7 +90,7 @@ public sealed class MultitenancyModule : IModule
                     if (context.MultiTenantContext.StoreInfo is null) return;
                     if (context.MultiTenantContext.StoreInfo.StoreType != typeof(DistributedCacheStore<AppTenantInfo>))
                     {
-                        var sp = ((HttpContext)context.Context!).RequestServices;
+                        var sp = ((HttpContext)context.Context).RequestServices;
                         var distributedStore = sp
                             .GetRequiredService<IEnumerable<IMultiTenantStore<AppTenantInfo>>>()
                             .FirstOrDefault(s => s.GetType() == typeof(DistributedCacheStore<AppTenantInfo>));
@@ -93,8 +101,10 @@ public sealed class MultitenancyModule : IModule
                 };
             })
             // ── Strategy chain — first non-null identifier wins (registration order) ──
-            // ClaimStrategy no-ops here: UseMultiTenant() runs BEFORE UseAuthentication(), so User is
-            // anonymous at resolution. Tenant stays header-driven; root override is post-auth middleware below.
+            // ClaimStrategy authenticates on its own: UseMultiTenant() runs before UseAuthentication(), so Finbuckle
+            // runs the default scheme's handler itself. An authenticated caller resolves to its tenant claim and a
+            // `tenant` header cannot move it; the header decides only for anonymous requests (login, refresh).
+            // The root-operator override is post-auth middleware below.
             .WithClaimStrategy(ClaimConstants.Tenant)
             .WithHeaderStrategy(MultitenancyConstants.Identifier)
             .WithDelegateStrategy(async context =>
@@ -124,8 +134,9 @@ public sealed class MultitenancyModule : IModule
         ArgumentNullException.ThrowIfNull(app);
 
         // ── Root-operator header override ──────────────────────────────
-        // A "root"-claim caller scopes one request to another tenant via the `tenant` header (post-auth, since
-        // Finbuckle's pre-auth chain has no User). Gated on claim==root + header set != root + target exists.
+        // A "root"-claim caller scopes one request to another tenant via the `tenant` header. The claim strategy has
+        // already resolved that caller to root, so the switch happens here, post-auth. Gated on claim==root +
+        // header set != root + target exists.
         app.Use(async (ctx, next) =>
         {
             var callerTenant = ctx.User?.FindFirstValue(ClaimConstants.Tenant);
@@ -159,8 +170,8 @@ public sealed class MultitenancyModule : IModule
                 var accessor = ctx.RequestServices.GetRequiredService<IMultiTenantContextAccessor<AppTenantInfo>>();
                 var tenant = accessor.MultiTenantContext?.TenantInfo;
 
-                // Claim strategy no-ops pre-auth, so a JWT-only (no header) request may have no resolved
-                // tenant here — fall back to the caller's claim.
+                // An authenticated request normally resolves through the claim strategy; if nothing resolved,
+                // fall back to the caller's claim.
                 if (tenant is null && !string.IsNullOrEmpty(callerTenant))
                 {
                     var store = ctx.RequestServices.GetRequiredService<IMultiTenantStore<AppTenantInfo>>();

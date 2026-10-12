@@ -27,10 +27,12 @@ public sealed class TenantBillingLifecycleTests
     };
 
     private readonly AuthHelper _auth;
+    private readonly FshWebApplicationFactory _factory;
 
     public TenantBillingLifecycleTests(FshWebApplicationFactory factory)
     {
         _auth = new AuthHelper(factory);
+        _factory = factory;
     }
 
     [Fact]
@@ -42,11 +44,15 @@ public sealed class TenantBillingLifecycleTests
         var tenantId = $"life-{unique}";
         await CreateTenantAsync(rootClient, tenantId, $"life-{unique}@tenant.com", planKey);
 
+        // TenantSubscribed now goes through the outbox, so Billing reacts on the next dispatch
+        // cycle rather than inside the create request.
+        await OutboxDrain.DrainAsync(_factory.Services);
+
         // Active subscription on the new plan.
         var subscription = await rootClient.GetFromJsonAsync<SubscriptionDto>(
             $"{BillingBasePath}/subscriptions?tenantId={tenantId}", Json);
         subscription.ShouldNotBeNull("creating a tenant must start a subscription");
-        subscription!.PlanKey.ShouldBe(planKey);
+        subscription.PlanKey.ShouldBe(planKey);
         subscription.Status.ShouldBe(SubscriptionStatus.Active);
 
         // Exactly one issued subscription invoice for the plan term price.
@@ -60,7 +66,7 @@ public sealed class TenantBillingLifecycleTests
         var status = await rootClient.GetFromJsonAsync<TenantStatus>(
             $"{TestConstants.TenantsBasePath}/{tenantId}/status", Json);
         status.ShouldNotBeNull();
-        status!.Plan.ShouldBe(planKey);
+        status.Plan.ShouldBe(planKey);
         status.ValidUpto!.Value.ShouldBeGreaterThan(DateTime.UtcNow.AddDays(27));
         status.ValidUpto.Value.ShouldBeLessThan(DateTime.UtcNow.AddDays(32));
     }
@@ -73,11 +79,12 @@ public sealed class TenantBillingLifecycleTests
         var planKey = await CreatePlanAsync(rootClient, $"free-{unique}", monthlyBasePrice: 0m);
         var tenantId = $"free-{unique}";
         await CreateTenantAsync(rootClient, tenantId, $"free-{unique}@tenant.com", planKey);
+        await OutboxDrain.DrainAsync(_factory.Services);
 
         var subscription = await rootClient.GetFromJsonAsync<SubscriptionDto>(
             $"{BillingBasePath}/subscriptions?tenantId={tenantId}", Json);
         subscription.ShouldNotBeNull("a free plan still gets a subscription");
-        subscription!.Status.ShouldBe(SubscriptionStatus.Active);
+        subscription.Status.ShouldBe(SubscriptionStatus.Active);
 
         var invoices = await GetInvoicesAsync(rootClient, tenantId);
         invoices.Any(i => i.Purpose == InvoicePurpose.Subscription)
@@ -89,7 +96,7 @@ public sealed class TenantBillingLifecycleTests
         var page = await client.GetFromJsonAsync<PagedResponse<InvoiceDto>>(
             $"{BillingBasePath}/invoices?tenantId={tenantId}&pageNumber=1&pageSize=50", Json);
         page.ShouldNotBeNull();
-        return page!.Items;
+        return page.Items;
     }
 
     private static async Task<string> CreatePlanAsync(HttpClient client, string key, decimal monthlyBasePrice)

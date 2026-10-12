@@ -140,7 +140,11 @@ public sealed class RenewTenantTests
         var tenantId = $"renew-drift-{unique}";
         var planKey = await CreatePlanAsync(rootClient, $"drift-m-{unique}", monthlyBasePrice: 10m);
         await CreateTenantAsync(rootClient, tenantId, $"renew-drift-{unique}@tenant.com", planKey);
-        await WaitForProvisioningAsync(rootClient, tenantId);
+        await TenantProvisioningWait.WaitForProvisioningAsync(rootClient, tenantId);
+
+        // TenantSubscribed/TenantRenewed go through the outbox now, so Billing reacts on the next
+        // dispatch cycle rather than inside the request.
+        await OutboxDrain.DrainAsync(_factory.Services);
 
         var before = await GetSubscriptionEndUtcAsync(rootClient, tenantId);
         before.ShouldNotBeNull("a plan-bound tenant has an active subscription with an end date");
@@ -148,9 +152,11 @@ public sealed class RenewTenantTests
         var result = await RenewAsync(rootClient, tenantId, planKey);
         result.PlanChanged.ShouldBeFalse("renewing the same plan does not change it");
 
-        var after = await PollSubscriptionEndUtcAdvancedAsync(rootClient, tenantId, before!.Value);
+        await OutboxDrain.DrainAsync(_factory.Services);
+
+        var after = await PollSubscriptionEndUtcAdvancedAsync(rootClient, tenantId, before.Value);
         after.ShouldNotBeNull();
-        after!.Value.ShouldBeGreaterThan(before.Value,
+        after.Value.ShouldBeGreaterThan(before.Value,
             "a same-plan renewal must extend Subscription.EndUtc, not just tenant ValidUpto");
         after.Value.ShouldBe(result.ValidUpto, tolerance: TimeSpan.FromSeconds(5),
             "the subscription term should track the renewed validity");
@@ -218,7 +224,7 @@ public sealed class RenewTenantTests
         var adminEmail = $"renew-authz-{unique}@tenant.com";
         var planKey = await CreatePlanAsync(rootClient, $"az-{unique}", monthlyBasePrice: 5m);
         await CreateTenantAsync(rootClient, tenantId, adminEmail, planKey);
-        await WaitForProvisioningAsync(rootClient, tenantId);
+        await TenantProvisioningWait.WaitForProvisioningAsync(rootClient, tenantId);
 
         using var tenantClient = await CreateTenantAdminClientWithRetryAsync(
             adminEmail, TestConstants.DefaultPassword, tenantId);
@@ -259,7 +265,7 @@ public sealed class RenewTenantTests
         response.StatusCode.ShouldBe(HttpStatusCode.OK, await response.Content.ReadAsStringAsync());
         var result = await response.Content.ReadFromJsonAsync<RenewResult>(Json);
         result.ShouldNotBeNull();
-        return result!;
+        return result;
     }
 
     private static async Task<string> CreatePlanAsync(HttpClient client, string key, decimal monthlyBasePrice)
@@ -300,29 +306,7 @@ public sealed class RenewTenantTests
         resp.StatusCode.ShouldBe(HttpStatusCode.OK);
         var status = await resp.Content.ReadFromJsonAsync<TenantStatus>(Json);
         status.ShouldNotBeNull();
-        return status!;
-    }
-
-    private static async Task WaitForProvisioningAsync(HttpClient client, string tenantId, int maxRetries = 60)
-    {
-        for (var i = 0; i < maxRetries; i++)
-        {
-            var statusResponse = await client.GetAsync($"{TestConstants.TenantsBasePath}/{tenantId}/provisioning");
-            if (statusResponse.IsSuccessStatusCode)
-            {
-                var content = await statusResponse.Content.ReadAsStringAsync();
-                if (content.Contains("Completed", StringComparison.OrdinalIgnoreCase))
-                {
-                    return;
-                }
-                if (content.Contains("Failed", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new InvalidOperationException($"Tenant {tenantId} provisioning failed: {content}");
-                }
-            }
-            await Task.Delay(1000);
-        }
-        throw new TimeoutException($"Tenant {tenantId} did not finish provisioning.");
+        return status;
     }
 
     private static async Task<DateTime?> GetSubscriptionEndUtcAsync(HttpClient client, string tenantId)

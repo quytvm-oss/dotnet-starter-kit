@@ -11,7 +11,7 @@ namespace FSH.Modules.Multitenancy.Features.v1.RenewTenant;
 public sealed class RenewTenantCommandHandler(
     ITenantService tenantService,
     IMediator mediator,
-    IEventBus events,
+    IOutboxWriter outbox,
     IOptions<TenantBillingOptions> billingOptions,
     TimeProvider timeProvider)
     : ICommandHandler<RenewTenantCommand, RenewTenantCommandResponse>
@@ -25,15 +25,15 @@ public sealed class RenewTenantCommandHandler(
         var targetKey = command.PlanKey;
         if (string.IsNullOrWhiteSpace(targetKey))
         {
-            targetKey = string.IsNullOrWhiteSpace(status.Plan) ? billingOptions.Value.DefaultPlanKey : status.Plan!;
+            targetKey = string.IsNullOrWhiteSpace(status.Plan) ? billingOptions.Value.DefaultPlanKey : status.Plan;
         }
 
-        var term = await mediator.Send(new GetPlanTermQuery(targetKey!), cancellationToken).ConfigureAwait(false);
+        var term = await mediator.Send(new GetPlanTermQuery(targetKey), cancellationToken).ConfigureAwait(false);
 
         var (periodStart, validUpto, planChanged) = await tenantService
             .RenewAsync(command.TenantId, term.Key, term.TermMonths, cancellationToken).ConfigureAwait(false);
 
-        await events.PublishAsync(new TenantRenewedIntegrationEvent(
+        await outbox.AddAsync(new TenantRenewedIntegrationEvent(
             Id: Guid.NewGuid(),
             OccurredOnUtc: timeProvider.GetUtcNow().UtcDateTime,
             TenantId: command.TenantId,
